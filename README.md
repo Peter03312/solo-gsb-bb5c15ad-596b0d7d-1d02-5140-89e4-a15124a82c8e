@@ -22,6 +22,10 @@
   与窗口的相交关系分为**确定命中**（完整区间在窗内）、**可能命中**（仅部分相交）、
   **未命中**三类并分别计数；起止缺失、无法解析或起点晚于终点时给出中文错误，
   且不改动上次检索结果
+- 跨设备操作耗时：指定**关联字段**（如 `requestId` / `traceId`）、**状态字段**
+  （如 `status`）及开始/结束两种状态值，按关联值分组配对一次操作的开始与结束，
+  给出跨设备持续时间范围；缺一端标**未配对**、任一端重复标**歧义**、
+  结束区间早于开始区间标**时间冲突**，均不输出时长；缺字段或状态不匹配的事件跳过计数
 - 导出：一键下载合并后的 JSONL（含原始时间、校正区间、顺序不确定标记与原始事件）
 - 时间字段：默认自动探测 `ts` / `time` / `timestamp`，也可逐设备指定字段名
 
@@ -63,7 +67,19 @@ npm test         # 运行核心校时逻辑单元测试
    “确定命中 / 可能命中 / 未命中”徽标，并显示三类计数；边界相接算相交。
    起止缺失、无法解析或起点晚于终点时仅提示中文错误，上次检索结果保持不变；
    点击 **清除** 可移除检索标记（输入框内容保留）。重新“校时并合并”后检索结果自动失效。
-6. 点击 **导出合并 JSONL** 下载结果，每行格式：
+7. 在统一时间线下方的 **跨设备操作耗时** 中填写：
+   - **关联字段名**：日志里标识同一次操作的字段，如 `requestId` / `traceId` / `opId`；
+   - **状态字段名**：区分操作阶段的字段，如 `status` / `event`；
+   - **开始状态值 / 结束状态值**：一次操作开始与结束对应的两种状态，如 `START` / `END`。
+   点击 **分析耗时**，系统按关联值分组：同组**恰有一条开始、一条结束**才配对；
+   **缺一端**（只有开始或只有结束）标为“未配对”，**任一端重复**（多条开始或多条结束）
+   标为“歧义”，**结束区间早于开始区间**标为“时间冲突”——这三类都不输出时长。
+   配对后以两条事件的校正区间 `[最早, 最晚]` 求持续时间范围：
+   `最短 = max(0, 结束最早 − 开始最晚)`，`最长 = 结束最晚 − 开始最早`；
+   两区间相交时最短为 0。顶部汇总展示各组状态与**跳过数**（缺字段 / 状态不匹配）。
+   字段名空缺或两种状态值相同时给出中文错误，**上次分析结果保持不变**；
+   重新“校时并合并”后分析结果自动失效。
+8. 点击 **导出合并 JSONL** 下载结果，每行格式：
 
 ```json
 {
@@ -107,10 +123,10 @@ npm test         # 运行核心校时逻辑单元测试
 ## 项目结构
 
 ```
-server.js            Express 服务（静态页面 + /api/sync 等接口）
-lib/timesync.js      核心校时逻辑（锚点校验、分段线性映射、合并、导出）
+server.js            Express 服务（静态页面 + /api/sync、/api/window-search、/api/operation-duration 等接口）
+lib/timesync.js      核心校时逻辑（锚点校验、分段线性映射、合并、时间窗分类、操作配对、导出）
 public/              原生前端（index.html / app.js / style.css）
-test/                node:test 单元测试
+test/                node:test 单元测试（校时逻辑 + 操作配对）
 Dockerfile           单阶段生产镜像（node:20-alpine）
 docker-compose.yml   单服务编排，映射 8080 端口
 ```
@@ -122,6 +138,7 @@ docker-compose.yml   单服务编排，映射 8080 端口
 | POST | `/api/sync` | 提交设备列表（锚点 + JSONL 原文），返回合并时间线与导出 JSONL |
 | POST | `/api/parse-anchors` | 解析锚点文本（前端辅助） |
 | POST | `/api/window-search` | 时间窗检索：按事件校正区间与窗口的相交关系分类计数 |
+| POST | `/api/operation-duration` | 跨设备操作耗时：按关联字段分组配对开始/结束事件，求持续时间范围 |
 | GET | `/api/health` | 健康检查 |
 
 `POST /api/sync` 请求体示例：
@@ -162,3 +179,71 @@ ISO 8601 或 epoch 毫秒，`timeline` 取 `/api/sync` 响应中的时间线数�
 `classes` 与提交的 `timeline` 同序：`hit` 确定命中（事件区间完整在窗内）、
 `partial` 可能命中（仅部分相交）、`miss` 未命中。起止缺失、无法解析或起点晚于
 终点时返回 `400` 及中文错误说明。
+
+`POST /api/operation-duration` 请求体为
+`{ timeline, correlationField, statusField, startValue, endValue }`：
+`timeline` 取 `/api/sync` 响应中的时间线数组（复用既有合并结果），
+`correlationField` / `statusField` 为日志中的关联字段名与状态字段名，
+`startValue` / `endValue` 为开始与结束两种状态值。字段名空缺、状态值空缺或两状态值
+相同时返回 `400` 及中文错误说明。调用示例：
+
+```bash
+curl -s -X POST http://localhost:8080/api/operation-duration \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "timeline": [
+      { "correctedEarliest": 900,  "correctedLatest": 1100, "device": "dev-A",
+        "event": { "requestId": "req-1", "status": "START" } },
+      { "correctedEarliest": 4900, "correctedLatest": 5100, "device": "dev-B",
+        "event": { "requestId": "req-1", "status": "END" } },
+      { "correctedEarliest": 1900, "correctedLatest": 2100, "device": "dev-A",
+        "event": { "requestId": "req-2", "status": "START" } }
+    ],
+    "correlationField": "requestId",
+    "statusField": "status",
+    "startValue": "START",
+    "endValue": "END"
+  }'
+```
+
+响应：
+
+```json
+{
+  "correlationField": "requestId",
+  "statusField": "status",
+  "startValue": "START",
+  "endValue": "END",
+  "totalEvents": 3,
+  "groupedEvents": 3,
+  "skipped": { "missingField": 0, "statusMismatch": 0, "total": 0 },
+  "counts": { "paired": 1, "unpaired": 1, "ambiguous": 0, "timeConflict": 0 },
+  "groups": [
+    {
+      "correlation": "req-1",
+      "status": "paired",
+      "startCount": 1,
+      "endCount": 1,
+      "start": { "device": "dev-A", "correctedTime": 1000, "correctedEarliest": 900, "correctedLatest": 1100 },
+      "end": { "device": "dev-B", "correctedTime": 5000, "correctedEarliest": 4900, "correctedLatest": 5100 },
+      "durationMs": { "min": 3800, "max": 4200 }
+    },
+    {
+      "correlation": "req-2",
+      "status": "unpaired",
+      "startCount": 1,
+      "endCount": 0,
+      "start": { "device": "dev-A", "correctedTime": 2000, "correctedEarliest": 1900, "correctedLatest": 2100 },
+      "end": null,
+      "durationMs": null
+    }
+  ]
+}
+```
+
+各组 `status` 取值：`paired`（已配对，输出 `durationMs = { min, max }`，
+`min = max(0, 结束最早 − 开始最晚)`、`max = 结束最晚 − 开始最早`，区间相交时 `min` 为 0）、
+`unpaired`（缺开始或结束一端）、`ambiguous`（任一端重复，`startCount` / `endCount`
+给出条数）、`time_conflict`（结束最晚早于开始最早）；后三种均不输出时长（`durationMs: null`）。
+`skipped` 为跳过事件计数：`missingField`（缺关联或状态字段）与 `statusMismatch`
+（状态值既非开始也非结束）。

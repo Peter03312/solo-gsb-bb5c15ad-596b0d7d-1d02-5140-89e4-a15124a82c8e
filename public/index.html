@@ -57,6 +57,32 @@
         <span id="window-status" class="status"></span>
       </div>
       <div id="window-counts" class="window-counts hidden"></div>
+      <div class="op-duration">
+        <div class="od-head">
+          <span class="ws-label">跨设备操作耗时</span>
+          <input id="od-correlation" type="text" placeholder="关联字段名，如 requestId / traceId" spellcheck="false" />
+          <input id="od-status-field" type="text" placeholder="状态字段名，如 status / event" spellcheck="false" />
+          <input id="od-start" type="text" placeholder="开始状态值，如 START" spellcheck="false" />
+          <input id="od-end" type="text" placeholder="结束状态值，如 END" spellcheck="false" />
+          <button id="btn-od-analyze" class="btn btn-primary" type="button">分析耗时</button>
+          <span id="od-status" class="status"></span>
+        </div>
+        <div id="od-summary" class="od-summary hidden"></div>
+        <div class="table-wrap">
+          <table id="od-table" class="hidden">
+            <thead>
+              <tr>
+                <th>关联值</th>
+                <th>状态</th>
+                <th>开始（设备 / 校正时间）</th>
+                <th>结束（设备 / 校正时间）</th>
+                <th>持续时间范围（最短 ~ 最长）</th>
+              </tr>
+            </thead>
+            <tbody id="od-body"></tbody>
+          </table>
+        </div>
+      </div>
       <div id="summary" class="summary"></div>
       <div id="errors" class="errors hidden"></div>
       <div class="table-wrap">

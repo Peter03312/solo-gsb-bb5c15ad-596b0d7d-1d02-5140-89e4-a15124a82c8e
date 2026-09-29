@@ -16,9 +16,30 @@ const windowStartEl = document.getElementById('window-start');
 const windowEndEl = document.getElementById('window-end');
 const windowStatusEl = document.getElementById('window-status');
 const windowCountsEl = document.getElementById('window-counts');
+const odCorrelationEl = document.getElementById('od-correlation');
+const odStatusFieldEl = document.getElementById('od-status-field');
+const odStartEl = document.getElementById('od-start');
+const odEndEl = document.getElementById('od-end');
+const odStatusEl = document.getElementById('od-status');
+const odSummaryEl = document.getElementById('od-summary');
+const odTableEl = document.getElementById('od-table');
+const odBodyEl = document.getElementById('od-body');
 
 const WINDOW_CLASS_LABELS = { hit: '确定命中', partial: '可能命中', miss: '未命中' };
 const WINDOW_CLASS_BADGES = { hit: 'badge-hit', partial: 'badge-partial', miss: 'badge-miss' };
+
+const OD_STATUS_LABELS = {
+  paired: '已配对',
+  unpaired: '未配对',
+  ambiguous: '歧义',
+  time_conflict: '时间冲突',
+};
+const OD_STATUS_BADGES = {
+  paired: 'badge-ok',
+  unpaired: 'badge-miss',
+  ambiguous: 'badge-warn',
+  time_conflict: 'badge-uncertain',
+};
 
 let lastResult = null;
 
@@ -111,6 +132,7 @@ async function doSync() {
     }
     lastResult = data;
     clearWindowSearch();
+    clearOperationDuration();
     renderResult(data);
     setStatus(`完成：${data.eventCount} 条事件已合并`, 'ok');
   } catch (err) {
@@ -212,6 +234,114 @@ function clearWindowSearch() {
   windowCountsEl.innerHTML = '';
   setWindowStatus('');
   renderTable();
+}
+
+function setOdStatus(msg, cls) {
+  odStatusEl.textContent = msg || '';
+  odStatusEl.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+/** 清除操作耗时分析结果（重新校时合并后调用；输入框内容保留）。 */
+function clearOperationDuration() {
+  odSummaryEl.classList.add('hidden');
+  odSummaryEl.innerHTML = '';
+  odTableEl.classList.add('hidden');
+  odBodyEl.innerHTML = '';
+  setOdStatus('');
+}
+
+/** 跨设备操作耗时分析：把当前时间线与字段配置发给服务端配对；参数错误时仅提示，不改动上次分析结果。 */
+async function doOperationDuration() {
+  if (!lastResult) {
+    setOdStatus('请先执行“校时并合并”生成统一时间线', 'error');
+    return;
+  }
+  try {
+    const resp = await fetch('/api/operation-duration', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        timeline: lastResult.timeline,
+        correlationField: odCorrelationEl.value,
+        statusField: odStatusFieldEl.value,
+        startValue: odStartEl.value,
+        endValue: odEndEl.value,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      setOdStatus(data.error || `分析失败（HTTP ${resp.status}）`, 'error');
+      return;
+    }
+    renderOperationDuration(data);
+    setOdStatus(
+      `${data.groups.length} 组：已配对 ${data.counts.paired}，未配对 ${data.counts.unpaired}，歧义 ${data.counts.ambiguous}，时间冲突 ${data.counts.timeConflict}`,
+      'ok'
+    );
+  } catch (err) {
+    setOdStatus(`分析出错：${err.message}`, 'error');
+  }
+}
+
+/** 渲染操作耗时分析结果：各组状态徽标、时长范围与跳过数汇总。 */
+function renderOperationDuration(data) {
+  odSummaryEl.classList.remove('hidden');
+  odSummaryEl.innerHTML =
+    `<span>事件总数：<strong>${data.totalEvents}</strong></span>` +
+    `<span>入组事件：<strong>${data.groupedEvents}</strong></span>` +
+    `<span>跳过：<strong class="od-skip">${data.skipped.total}</strong>` +
+    `（缺字段 ${data.skipped.missingField} · 状态不匹配 ${data.skipped.statusMismatch}）</span>` +
+    `<span>已配对：<strong class="wc-hit">${data.counts.paired}</strong></span>` +
+    `<span>未配对：<strong>${data.counts.unpaired}</strong></span>` +
+    `<span>歧义：<strong class="wc-partial">${data.counts.ambiguous}</strong></span>` +
+    `<span>时间冲突：<strong class="wc-miss">${data.counts.timeConflict}</strong></span>`;
+
+  odTableEl.classList.remove('hidden');
+  odBodyEl.innerHTML = '';
+  data.groups.forEach((g) => {
+    const tr = document.createElement('tr');
+    if (g.status === 'ambiguous') tr.classList.add('extrapolated');
+    if (g.status === 'time_conflict') tr.classList.add('uncertain');
+
+    const endpoint = (which) => {
+      const ep = g[which];
+      if (!ep) return '<span class="muted">—</span>';
+      return (
+        `<div>${escapeHtml(ep.device)}</div>` +
+        `<div class="muted">${escapeHtml(fmtIso(ep.correctedTime))}</div>`
+      );
+    };
+    let durationCell;
+    if (g.status === 'paired') {
+      durationCell = `<span class="mono">${formatDuration(g.durationMs.min)} ~ ${formatDuration(g.durationMs.max)}</span>`;
+    } else {
+      const reason = {
+        unpaired: '缺开始或结束事件',
+        ambiguous: `开始 ${g.startCount} 条 / 结束 ${g.endCount} 条`,
+        time_conflict: '结束区间早于开始区间',
+      }[g.status];
+      durationCell = `<span class="muted">不输出时长（${reason}）</span>`;
+    }
+
+    tr.innerHTML =
+      `<td class="mono">${escapeHtml(g.correlation)}</td>` +
+      `<td><span class="badge ${OD_STATUS_BADGES[g.status]}">${OD_STATUS_LABELS[g.status]}</span></td>` +
+      `<td>${endpoint('start')}</td>` +
+      `<td>${endpoint('end')}</td>` +
+      `<td>${durationCell}</td>`;
+    odBodyEl.appendChild(tr);
+  });
+}
+
+/** 把毫秒时长格式化为易读形式（毫秒 / 秒 / 分秒）。 */
+function formatDuration(ms) {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s < 10 ? s.toFixed(2) : s.toFixed(1)} s`;
+  const m = Math.floor(s / 60);
+  const rem = s - m * 60;
+  return `${m} min ${rem.toFixed(1)} s`;
 }
 
 function renderTable() {
@@ -325,6 +455,12 @@ document.getElementById('btn-sync').addEventListener('click', doSync);
 document.getElementById('btn-export').addEventListener('click', exportJsonl);
 document.getElementById('btn-window-search').addEventListener('click', doWindowSearch);
 document.getElementById('btn-window-clear').addEventListener('click', clearWindowSearch);
+document.getElementById('btn-od-analyze').addEventListener('click', doOperationDuration);
+[odCorrelationEl, odStatusFieldEl, odStartEl, odEndEl].forEach((el) =>
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doOperationDuration();
+  })
+);
 [windowStartEl, windowEndEl].forEach((el) =>
   el.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') doWindowSearch();

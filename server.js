@@ -8,6 +8,7 @@ const {
   toJsonl,
   normalizeWindow,
   classifyWindow,
+  pairOperations,
   AUTO_TIME_FIELDS,
 } = require('./lib/timesync');
 
@@ -109,6 +110,30 @@ app.post('/api/window-search', (req, res) => {
     counts,
     classes: results.map((r) => r.windowClass),
   });
+});
+
+/**
+ * POST /api/operation-duration
+ * body: { timeline: [...], correlationField, statusField, startValue, endValue }
+ * 跨设备操作耗时分析：按关联字段分组，同组恰有一条开始、一条结束才配对；
+ * 缺一端（未配对）或任一端重复（歧义）均不输出时长。配对后以校正区间求持续时间：
+ * 最短 = max(0, 结束最早 − 开始最晚)，最长 = 结束最晚 − 开始最早；
+ * 结束最晚早于开始最早时标记时间冲突且不输出时长。缺字段/状态不匹配的事件跳过并计数。
+ * 字段名空缺、状态值空缺或两状态值相同时返回 400 及中文错误，调用方不应改动已有结果。
+ */
+app.post('/api/operation-duration', (req, res) => {
+  const body = req.body || {};
+  try {
+    const result = pairOperations(Array.isArray(body.timeline) ? body.timeline : [], {
+      correlationField: body.correlationField,
+      statusField: body.statusField,
+      startValue: body.startValue,
+      endValue: body.endValue,
+    });
+    res.json(result);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
 });
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, autoTimeFields: AUTO_TIME_FIELDS }));
